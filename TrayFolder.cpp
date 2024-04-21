@@ -1,10 +1,10 @@
-
 #include <Windows.h>
 #include <Windowsx.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <PathCch.h>
 #include <CommCtrl.h>
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "pathcch.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -15,13 +15,10 @@
     #pragma comment(lib, "bcrypt.lib")
 #endif
 
-#if 0 && defined(_CONSOLE)
+// #define ALSO_LOG_TO_FILE
+// #define ALSO_LOG_TO_CONSOLE
+#if defined(ALSO_LOG_TO_CONSOLE) || defined(ALSO_LOG_TO_FILE)
     #include <cstdio>
-    #define LOG_INFO(fmt_, ...)  ::printf("(I) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
-    #define LOG_DEBUG(fmt_, ...) ::printf("(D) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
-#else
-    #define LOG_INFO(fmt_, ...)  /**/
-    #define LOG_DEBUG(fmt_, ...) /**/
 #endif
 
 #define APP_NAME L"TrayFolder"
@@ -31,6 +28,9 @@
 
 #define CHECK_WINAPI(expr_) \
     ReportError((expr_), (decltype(expr_))0, true, APP_NAME, L"", _T(#expr_), _T(__FUNCTION__), _T(__FILE__), __LINE__)
+
+#define LOG_INFO(fmt_, ...)  Log("(I) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
+#define LOG_DEBUG(fmt_, ...) Log("(D) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
 
 // TODO(yzt): Add DEFER
 
@@ -50,14 +50,13 @@ constexpr GUID kTrayIconGuid = {
 #endif
 
 struct FolderData {
-    // static constexpr int Capacity = 1024;
     wchar_t dir[MAX_PATH];
     int     count;
     struct {
         wchar_t file[MAX_PATH];
-        wchar_t title[256];
+        wchar_t title[243];
+        bool    isDir;
         HICON   icon;
-        // int iconIndex;
         HBITMAP bitmap;
     } entries[256];
 };
@@ -68,6 +67,32 @@ static wchar_t*      g_path;
 static SHSTOCKICONID g_icon     = SHSTOCKICONID::SIID_FOLDER;
 static GUID          g_guid     = kTrayIconGuid;
 static bool          g_poppedUp = false;
+
+static void Log(char const* fmt, ...) {
+#if defined(ALSO_LOG_TO_FILE)
+    static FILE* s_logf = [] {
+        FILE* ret = nullptr;
+        ::fopen_s(&ret, APP_NAME ".log", "ab");
+        return ret;
+    }();
+#endif
+    char    buff[512];
+    va_list args;
+    va_start(args, fmt);
+    ::wvnsprintfA(buff, _countof(buff), fmt, args);
+    buff[_countof(buff) - 1] = '\0';
+    va_end(args);
+    ::OutputDebugStringA(buff);
+
+#if defined(ALSO_LOG_TO_FILE)
+    ::fputs(buff, s_logf);
+    ::fflush(s_logf);
+#endif
+#if defined(ALSO_LOG_TO_CONSOLE)
+    ::fputs(buff, stderr);
+    ::fflush(stderr);
+#endif
+}
 
 template<typename T>
 static T ReportError(
@@ -131,6 +156,17 @@ static size_t StrCopy(wchar_t* dst, size_t dstCap, wchar_t const* src, size_t sr
     return i;
 }
 
+static int StrCompare(wchar_t const* s1, wchar_t const* s2) {
+    for (int i = 0; s1[i] || s2[i]; ++i) {
+        // This way of case-insensitive comparison is not exactly correct, but who cares
+        int const c1 = ('A' <= s1[i] && s1[i] <= 'Z' ? s1[i] -'A' + 'a' : s1[i]);
+        int const c2 = ('A' <= s2[i] && s2[i] <= 'Z' ? s2[i] -'A' + 'a' : s2[i]);
+        if (c1 != c2)
+            return c1 - c2;
+    }
+    return 0;
+}
+
 static bool LoadFolder(FolderData& out, wchar_t const* dir) {
     for (int i = 0; i < out.count; ++i) {
         //::DestroyIcon(out.entries[i].icon);
@@ -154,6 +190,7 @@ static bool LoadFolder(FolderData& out, wchar_t const* dir) {
             // if (findData.nFileSizeLow == 0 && findData.nFileSizeHigh == 0) continue;
             auto& entry = out.entries[out.count++];
             StrCopy(entry.file, _countof(entry.file), findData.cFileName, _countof(findData.cFileName));
+            entry.isDir = (0 != (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
 
             // Remove extension for display
             StrCopy(entry.title, _countof(entry.title), findData.cFileName, _countof(findData.cFileName));
@@ -192,6 +229,26 @@ static bool LoadFolder(FolderData& out, wchar_t const* dir) {
     return true;
 }
 
+static void SortFolderData(FolderData& data) {
+    int const n = data.count;
+    auto      a = data.entries;
+    char      temp[sizeof(a[0])];
+    for (int i = 0; i < n - 1; ++i) {
+        int min = i;
+        for (int j = i + 1; j < n; ++j) {
+            if ((a[j].isDir == a[min].isDir && StrCompare(a[j].title, a[min].title) < 0)
+                || (a[j].isDir != a[min].isDir && a[j].isDir)) {
+                min = j;
+            }
+        }
+        if (min != i) {
+            ::CopyMemory(temp, &a[min], sizeof(temp));
+            ::MoveMemory(&a[i + 1], &a[i], sizeof(temp) * (min - i));
+            ::CopyMemory(&a[i], temp, sizeof(temp));
+        }
+    }
+}
+
 static HMENU BuildFolderMenu(FolderData& data) {
     HMENU menu = CHECK_WINAPI(::CreatePopupMenu());
     for (int i = 0; i < data.count; ++i) {
@@ -213,6 +270,12 @@ static HMENU BuildFolderMenu(FolderData& data) {
     // MENUITEMINFOW refreshItem = {.cbSize = sizeof(MENUITEMINFOW), .fMask = MIIM_ID | MIIM_STRING, .wID = 2,
     // .dwTypeData = refreshText}; CHECK_WINAPI(::InsertMenuItemW(menu, 0xFFFF'FFFF, true, &refreshItem));
 
+    wchar_t       hideText[] = L"&Dismiss";
+    MENUITEMINFOW hideItem   = {
+          .cbSize = sizeof(MENUITEMINFOW), .fMask = MIIM_ID | MIIM_STRING, .wID = 3, .dwTypeData = hideText
+    };
+    CHECK_WINAPI(::InsertMenuItemW(menu, 0xFFFF'FFFF, true, &hideItem));
+
     wchar_t       openText[] = L"&Open Folder";
     MENUITEMINFOW openItem   = {
           .cbSize = sizeof(MENUITEMINFOW), .fMask = MIIM_ID | MIIM_STRING, .wID = 2, .dwTypeData = openText
@@ -233,10 +296,11 @@ static int ShowFolderMenu(HWND hWnd, GUID const& iconGuid, HMENU menu) {
     RECT                 iconRect = {};
     NOTIFYICONIDENTIFIER niid     = {.cbSize = sizeof(NOTIFYICONIDENTIFIER), .hWnd = hWnd, .guidItem = iconGuid};
     CHECK_WINAPI(SUCCEEDED(::Shell_NotifyIconGetRect(&niid, &iconRect)));
-    // RECT iconRect = {.left = 1280, .top = 800, .right = 2560, .bottom = 1600};
 
     // Must do this (even though hWnd is not a real window), so the pop-up is dismiss-able
-    CHECK_WINAPI(::SetForegroundWindow(hWnd));
+    // FIXME: when this fails (e.g. when start menu is open) you have to use "Dismiss" item in the menu to dismiss it
+    // NOTE: (to future me) this does *not* interact with ::GetLastError()
+    ::SetForegroundWindow(hWnd);
 
     TPMPARAMS tpmParams = {.cbSize = sizeof(TPMPARAMS), .rcExclude = iconRect};
     UINT      flags     = /*TPM_LEFTALIGN | TPM_TOPALIGN |*/ TPM_NONOTIFY
@@ -278,11 +342,15 @@ static LRESULT CALLBACK MessageWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 g_poppedUp      = true;
                 double const t0 = NowMs();
                 CHECK_WINAPI(LoadFolder(g_data, g_path));
-                HMENU                         menu = CHECK_WINAPI(BuildFolderMenu(g_data));
-                [[maybe_unused]] double const dt   = NowMs() - t0;
-                LOG_DEBUG("Building menu took %0.3f ms", dt);
+                SortFolderData(g_data);
+                double const t1   = NowMs();
+                HMENU const  menu = CHECK_WINAPI(BuildFolderMenu(g_data));
+                double const t2   = NowMs();
+                LOG_DEBUG(
+                    "Building menu took %d ms (%d+%d)", int(t2 - t0 + 0.5), int(t1 - t0 + 0.5), int(t2 - t1 + 0.5)
+                );
                 int const choice = ShowFolderMenu(hWnd, g_guid, menu);
-                // LOG_INFO("MenuChoice: %d", choice);
+                LOG_INFO("MenuChoice: %d", choice);
                 if (choice == 1) {
                     PostQuitMessage(0);
                 } else if (choice == 2) {
@@ -378,7 +446,7 @@ WinMain(_In_ HINSTANCE /*hInst*/, _In_opt_ HINSTANCE /*hPrevInst*/, _In_ LPSTR /
         .uFlags           = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_STATE /*| NIF_INFO*/ | NIF_GUID | NIF_SHOWTIP,
         .uCallbackMessage = NotifyMessage,
         .hIcon            = hTrayIcon,
-        .szTip            = L"Just the tip...",
+        .szTip            = L"Just a tip...",
         .dwState          = 0 /*| NIS_SHAREDICON*/,
         .dwStateMask      = 0,
         .guidItem         = g_guid,
@@ -405,14 +473,13 @@ WinMain(_In_ HINSTANCE /*hInst*/, _In_opt_ HINSTANCE /*hPrevInst*/, _In_ LPSTR /
     };
     CHECK_WINAPI(::Shell_NotifyIconW(NIM_SETVERSION, &nidSetVer));
 
-#if 1 || POPUP
-    // Show a sample pop-up balloon
+    // Announce app start and direct attention to the icon
     NOTIFYICONDATAW nidPopUp = {
         .cbSize       = sizeof(NOTIFYICONDATAW),
         .hWnd         = window,
         .uID          = TrayIconId,
         .uFlags       = NIF_INFO | NIF_GUID | NIF_SHOWTIP,
-        .szInfo       = L"Ballooning the notification.",
+        .szInfo       = L"Ballooning the notification; should have been overwritten",
         .uTimeout     = 3'000,
         .szInfoTitle  = APP_NAME L" is running",
         .dwInfoFlags  = NIIF_USER | NIIF_LARGE_ICON | NIIF_NOSOUND | NIIF_RESPECT_QUIET_TIME,
@@ -421,7 +488,6 @@ WinMain(_In_ HINSTANCE /*hInst*/, _In_opt_ HINSTANCE /*hPrevInst*/, _In_ LPSTR /
     };
     StrCopy(nidPopUp.szInfo, _countof(nidPopUp.szInfo), g_path);
     CHECK_WINAPI(::Shell_NotifyIconW(NIM_MODIFY, &nidPopUp));
-#endif
 
     for (;;) {
         MSG        msg;

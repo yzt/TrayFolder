@@ -15,6 +15,6 @@ You can run as many instances of this program as you want, and each will create 
 Building
 --------
 
-The code is short and in a single file. You can use the provided project file, or just compile on the command line (I recommend the latter). I've only tested with VS2022, but as long as your compiler supports C++20 (for designated initializers), you should be fine.
+The code is short and in a single file. You can use the provided project file, or just compile on the command line (I recommend the latter, and don't forget C++20 and standard-conforming preprocessor flags). I've only tested with VS2022, but as long as your compiler supports C++20 (for designated initializers) and `__VA_OPT__`, you should be fine.
 
 Dependency-wise, I've used nothing but the Windows standard libraries. I really didn't need this for anything other that Win11, so I haven't tested it on older Windows and some inadvertent minimum version requirement might be there.
