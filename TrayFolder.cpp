@@ -15,8 +15,11 @@
     #pragma comment(lib, "bcrypt.lib")
 #endif
 
-// #define ALSO_LOG_TO_FILE
+// #define ALSO_LOG_TO_FILE         // By default, only log to debugger output
 // #define ALSO_LOG_TO_CONSOLE
+// #define LOG_EVERY_WINDOW_MESSAGE
+// #define BREAK_ON_ERRORS
+
 #if defined(ALSO_LOG_TO_CONSOLE) || defined(ALSO_LOG_TO_FILE)
     #include <cstdio>
 #endif
@@ -29,8 +32,8 @@
 #define CHECK_WINAPI(expr_) \
     ReportError((expr_), (decltype(expr_))0, true, APP_NAME, L"", _T(#expr_), _T(__FUNCTION__), _T(__FILE__), __LINE__)
 
-#define LOG_INFO(fmt_, ...)  Log("(I) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
-#define LOG_DEBUG(fmt_, ...) Log("(D) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
+#define LOG_INFO(fmt_, ...)  ::Log("(I) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
+#define LOG_DEBUG(fmt_, ...) ::Log("(D) " fmt_ "\n" __VA_OPT__(, ) __VA_ARGS__)
 
 // TODO(yzt): Add DEFER
 
@@ -108,7 +111,9 @@ static T ReportError(
 ) {
     bool const cond = (value != errorVal);
     if (!cond) {
-        //__debugbreak();
+#if defined(BREAK_ON_ERRORS)
+        __debugbreak();
+#endif
         wchar_t mstr[1024];
         wchar_t estr[512];
 
@@ -159,8 +164,8 @@ static size_t StrCopy(wchar_t* dst, size_t dstCap, wchar_t const* src, size_t sr
 static int StrCompare(wchar_t const* s1, wchar_t const* s2) {
     for (int i = 0; s1[i] || s2[i]; ++i) {
         // This way of case-insensitive comparison is not exactly correct, but who cares
-        int const c1 = ('A' <= s1[i] && s1[i] <= 'Z' ? s1[i] -'A' + 'a' : s1[i]);
-        int const c2 = ('A' <= s2[i] && s2[i] <= 'Z' ? s2[i] -'A' + 'a' : s2[i]);
+        int const c1 = ('A' <= s1[i] && s1[i] <= 'Z' ? s1[i] - 'A' + 'a' : s1[i]);
+        int const c2 = ('A' <= s2[i] && s2[i] <= 'Z' ? s2[i] - 'A' + 'a' : s2[i]);
         if (c1 != c2)
             return c1 - c2;
     }
@@ -206,11 +211,13 @@ static bool LoadFolder(FolderData& out, wchar_t const* dir) {
             // Get the icon for the file, and render it to a new bitmap (this produces correct masking, and also removes
             // possible overlays, e.g. link arrow, etc.)
             SHFILEINFOW shinfo       = {};
-            DWORD_PTR   sysImageList = CHECK_WINAPI(::SHGetFileInfoW(
-                fullpath, findData.dwFileAttributes, &shinfo, sizeof(shinfo),
-                SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES
-            ));
-            IMAGEINFO   imageInfo;
+            DWORD_PTR   sysImageList = CHECK_WINAPI(
+                ::SHGetFileInfoW(
+                    fullpath, findData.dwFileAttributes, &shinfo, sizeof(shinfo),
+                    SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES
+                )
+            );
+            IMAGEINFO imageInfo;
             CHECK_WINAPI(::ImageList_GetImageInfo((HIMAGELIST)sysImageList, shinfo.iIcon, &imageInfo));
             LONG const w          = imageInfo.rcImage.right - imageInfo.rcImage.left;
             LONG const h          = imageInfo.rcImage.bottom - imageInfo.rcImage.top;
@@ -314,13 +321,15 @@ static int ShowFolderMenu(HWND hWnd, GUID const& iconGuid, HMENU menu) {
         .uVersion = NOTIFYICON_VERSION_4,
         .guidItem = g_guid,
     };
-    CHECK_WINAPI(::Shell_NotifyIconW(NIM_SETFOCUS, &nidSetVer));
+
+    // This started failing with 0x80040005 in mid-Sep 2025 (same binary!) so removed the surrounding CHECK_WINAPI()
+    // ¯\_('')_/¯
+    ::Shell_NotifyIconW(NIM_SETFOCUS, &nidSetVer);
 
     return choice;
 }
 
 static LRESULT CALLBACK MessageWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-// #define LOG_EVERY_WINDOW_MESSAGE
 #if defined(LOG_EVERY_WINDOW_MESSAGE)
     if (NotifyMessage == msg) {
         LOG_DEBUG(
@@ -354,8 +363,8 @@ static LRESULT CALLBACK MessageWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 if (choice == 1) {
                     PostQuitMessage(0);
                 } else if (choice == 2) {
-                    [[maybe_unused]] auto res = (INT_PTR
-                    )::ShellExecuteW(nullptr, nullptr, g_data.dir, nullptr, nullptr, SW_SHOWNORMAL);
+                    [[maybe_unused]]
+                    auto res = (INT_PTR)::ShellExecuteW(nullptr, nullptr, g_data.dir, nullptr, nullptr, SW_SHOWNORMAL);
                 } else if (choice - 100 >= 0 && choice - 100 < g_data.count) {
                     auto const& entry = g_data.entries[choice - 100];
                     wchar_t     path[MAX_PATH * 2];
@@ -364,8 +373,8 @@ static LRESULT CALLBACK MessageWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                         PATHCCH_ALLOW_LONG_PATHS | PATHCCH_FORCE_ENABLE_LONG_NAME_PROCESS
                     );
                     LOG_DEBUG("Executing: %S", path);
-                    [[maybe_unused]] auto res = (INT_PTR
-                    )::ShellExecuteW(nullptr, nullptr, path, nullptr, nullptr, SW_SHOWNORMAL);
+                    [[maybe_unused]]
+                    auto res = (INT_PTR)::ShellExecuteW(nullptr, nullptr, path, nullptr, nullptr, SW_SHOWNORMAL);
                     LOG_DEBUG("%zd", res);
                 }
                 g_poppedUp = false;
